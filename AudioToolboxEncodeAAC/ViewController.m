@@ -12,9 +12,9 @@
 
 @property (nonatomic, strong) AVCaptureSession *mCaptureSession; // 负责输入和输出设备之间的数据传递
 @property (nonatomic, strong) AVCaptureDeviceInput *mCaptureAudioDeviceInput; // 负责从 AVCaptureDevice 获得输入数据
-@property (nonatomic, strong) AVCaptureAudioDataOutput *mCaptureAudioOutput;
+@property (nonatomic, strong) AVCaptureAudioDataOutput *mCaptureAudioOutput; // 负责管理输出数据
 
-@property (nonatomic , strong) AACEncoder *mAudioEncoder;
+@property (nonatomic, strong) AACEncoder *mAudioEncoder;
 
 @end
 
@@ -110,16 +110,19 @@
 
 #pragma mark - AVCaptureAudioDataOutputSampleBufferDelegate Method
 
-- (void)captureOutput:(AVCaptureOutput *)output
+- (void)captureOutput:(AVCaptureOutput *)captureOutput
         didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
         fromConnection:(AVCaptureConnection *)connection
 {
-    dispatch_sync(mEncodeQueue, ^{
-        [self.mAudioEncoder encodeSampleBuffer:sampleBuffer completionBlock:^(NSData *encodedData, NSError *error)
-         {
-            [self->audioFileHandle writeData:encodedData];
-        }];
-    });
+    if (captureOutput == self.mCaptureAudioOutput)
+    {
+        dispatch_sync(mEncodeQueue, ^{
+            [self.mAudioEncoder encodeSampleBuffer:sampleBuffer completionBlock:^(NSData *encodedData, NSError *error)
+             {
+                [self->audioFileHandle writeData:encodedData];
+            }];
+        });
+    }
 }
 
 @end

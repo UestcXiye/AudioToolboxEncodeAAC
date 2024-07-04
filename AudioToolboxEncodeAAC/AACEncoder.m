@@ -58,11 +58,29 @@
     AudioClassDescription *description = [self getAudioClassDescriptionWithType:kAudioFormatMPEG4AAC
                                                fromManufacturer:kAppleSoftwareAudioCodecManufacturer]; // 软编码
     // 创建转换器
-    OSStatus status = AudioConverterNewSpecific(&inputFormat, &outputFormat, 1, description, &_audioConverter);
+    OSStatus status = noErr;
+    status = AudioConverterNewSpecific(&inputFormat,&outputFormat, 1, description, &_audioConverter);
     if (status != noErr)
     {
         NSLog(@"setup converter error: %d", (int)status);
     }
+    // 设置码率
+    UInt32 outputBitrate = 64000; // 如果 PCM 采样率是 44.1kHz，那么码率可以设置 64000 bps，如果是 16kHz，可以设置为 32000 bps
+    status = AudioConverterSetProperty(_audioConverter,
+                                       kAudioConverterEncodeBitRate,
+                                       sizeof(outputBitrate),
+                                       &outputBitrate);
+    if (status != noErr)
+    {
+        NSLog(@"set converter bit rate error: %d", (int)status);
+    }
+    UInt32 value = 0;
+    UInt32 size = sizeof(value);
+    AudioConverterGetProperty(_audioConverter,
+                              kAudioConverterPropertyMaximumOutputPacketSize,
+                              &size,
+                              &value);
+    NSLog(@"maximum output packet size: %d", value); // 768
 }
 
 /**
@@ -81,6 +99,7 @@
     UInt32 encoderSpecifier = type;
     OSStatus status = noErr;
     
+    // 根据编码格式，获取描述符个数
     UInt32 size;
     status = AudioFormatGetPropertyInfo(kAudioFormatProperty_Encoders,
                                         sizeof(encoderSpecifier),
@@ -91,20 +110,20 @@
         NSLog(@"failed to get audio format property info: %d", status);
         return nil;
     }
-    
+    // 取出所有的描述符
     unsigned int count = size / sizeof(AudioClassDescription);
     AudioClassDescription descriptions[count];
     status = AudioFormatGetProperty(kAudioFormatProperty_Encoders,
-                                sizeof(encoderSpecifier),
-                                &encoderSpecifier,
-                                &size,
-                                descriptions);
+                                   sizeof(encoderSpecifier),
+                                   &encoderSpecifier,
+                                   &size,
+                                   descriptions);
     if (status != noErr)
     {
         NSLog(@"failed to get audio format property: %d", status);
         return nil;
     }
-    
+    // 找出与输出格式一致的描述符
     for (unsigned int i = 0; i < count; i++)
     {
         if ((type == descriptions[i].mSubType) && (manufacturer == descriptions[i].mManufacturer))
@@ -115,49 +134,6 @@
     }
     
     return nil;
-}
-
-
-/**
- *  A callback function that supplies audio data to convert. This callback is invoked repeatedly as the converter is ready for new input data.
- 
- */
-OSStatus inInputDataProc(AudioConverterRef inAudioConverter,
-                         UInt32 *ioNumberDataPackets,
-                         AudioBufferList *ioData,
-                         AudioStreamPacketDescription **outDataPacketDescription,
-                         void *inUserData)
-{
-    AACEncoder *encoder = (__bridge AACEncoder *)(inUserData);
-    UInt32 requestedPackets = *ioNumberDataPackets;
-    
-    size_t copiedSamples = [encoder copyPCMSamplesIntoBuffer:ioData];
-    if (copiedSamples < requestedPackets)
-    {
-        // PCM 缓冲区还没满
-        *ioNumberDataPackets = 0;
-        return -1;
-    }
-    *ioNumberDataPackets = 1;
-    
-    return noErr;
-}
-
-/**
- *  填充 PCM 到缓冲区
- */
-- (size_t)copyPCMSamplesIntoBuffer:(AudioBufferList *)ioData
-{
-    size_t originalBufferSize = _pcmBufferSize;
-    if (!originalBufferSize)
-    {
-        return 0;
-    }
-    ioData->mBuffers[0].mData = _pcmBuffer;
-    ioData->mBuffers[0].mDataByteSize = (int)_pcmBufferSize;
-    _pcmBuffer = nil;
-    _pcmBufferSize = 0;
-    return originalBufferSize;
 }
 
 - (void)encodeSampleBuffer:(CMSampleBufferRef)sampleBuffer completionBlock:(void (^)(NSData * encodedData, NSError* error))completionBlock
@@ -213,6 +189,47 @@ OSStatus inInputDataProc(AudioConverterRef inAudioConverter,
 }
 
 /**
+ *  A callback function that supplies audio data to convert. This callback is invoked repeatedly as the converter is ready for new input data.
+ */
+OSStatus inInputDataProc(AudioConverterRef inAudioConverter,
+                         UInt32 *ioNumberDataPackets,
+                         AudioBufferList *ioData,
+                         AudioStreamPacketDescription **outDataPacketDescription,
+                         void *inUserData)
+{
+    AACEncoder *encoder = (__bridge AACEncoder *)(inUserData);
+    UInt32 requestedPackets = *ioNumberDataPackets;
+    
+    size_t copiedSamples = [encoder copyPCMSamplesIntoBuffer:ioData];
+    if (copiedSamples < requestedPackets)
+    {
+        // PCM 缓冲区还没满
+        *ioNumberDataPackets = 0;
+        return -1;
+    }
+    *ioNumberDataPackets = 1;
+    
+    return noErr;
+}
+
+/**
+ *  填充 PCM 到缓冲区
+ */
+- (size_t)copyPCMSamplesIntoBuffer:(AudioBufferList *)ioData
+{
+    size_t originalBufferSize = _pcmBufferSize;
+    if (!originalBufferSize)
+    {
+        return 0;
+    }
+    ioData->mBuffers[0].mData = _pcmBuffer;
+    ioData->mBuffers[0].mDataByteSize = (int)_pcmBufferSize;
+    _pcmBuffer = nil;
+    _pcmBufferSize = 0;
+    return originalBufferSize;
+}
+
+/**
  *  Add ADTS header at the beginning of each and every AAC packet.
  *  This is needed as MediaCodec encoder generates a packet of raw AAC data.
  *
@@ -241,7 +258,7 @@ OSStatus inInputDataProc(AudioConverterRef inAudioConverter,
     int number_of_raw_data_blocks_in_frame = 0; // 该字段表示当前 ADTS 帧中所包含的 AAC 帧的个数减一。为了最大的兼容性通常每个 ADTS frame 包含一个 AAC frame，所以该值一般为 0
     
     packet[0] = (char)(syncword >> 4);
-    packet[1] = (char)(((syncword & 0xF) << 4) + (ID << 3) + (layer << 1) + profile);
+    packet[1] = (char)(((syncword & 0xF) << 4) + (ID << 3) + (layer << 1) + protection_absent);
     packet[2] = (char)((profile << 6) + (sample_frequency_index << 2) + (private_bit << 1) + (channel_configuration >> 2));
     packet[3] = (char)(((channel_configuration & 0x3) << 6) + (original_copy << 5) + (home << 4) + (copyright_identification_bit << 3) + (copyright_identification_start << 2) + (acc_frame_length >> 11));
     packet[4] = (char)((acc_frame_length & 0x7FF) >> 3);
@@ -252,9 +269,10 @@ OSStatus inInputDataProc(AudioConverterRef inAudioConverter,
     return data;
 }
 
-- (void) dealloc
+- (void)dealloc
 {
     AudioConverterDispose(_audioConverter);
+    free(_pcmBuffer);
     free(_aacBuffer);
 }
 
